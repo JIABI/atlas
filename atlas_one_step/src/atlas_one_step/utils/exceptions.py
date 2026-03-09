@@ -1,0 +1,2 @@
+class AtlasError(Exception):
+    pass

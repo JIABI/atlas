@@ -1,0 +1,3 @@
+name: fit_surrogate
+seeds: [0,1]
+out_dir: outputs/atlas/fit_surrogate
