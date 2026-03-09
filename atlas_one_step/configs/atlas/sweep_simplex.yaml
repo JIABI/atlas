@@ -1,0 +1,3 @@
+name: sweep_simplex
+seeds: [0,1]
+out_dir: outputs/atlas/sweep_simplex

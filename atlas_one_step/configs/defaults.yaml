@@ -1,0 +1,18 @@
+
+defaults:
+  - dataset: cifar10
+  - corruption: diffusion_like
+  - model: unet_small
+  - target: line_x0_u
+  - probe: pathology_score
+  - train: cheap_probe
+  - eval: metrics
+  - atlas: sweep_line
+  - selection: heuristic
+  - _self_
+
+seed: 42
+exp_id: default
+output_dir: outputs
+num_workers: 2
+device: cpu
