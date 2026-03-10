@@ -1,0 +1,5 @@
+name: pdebench_darcy
+root: data/pdebench/darcy
+resolution: 64
+batch_size: 8
+channels: 1
