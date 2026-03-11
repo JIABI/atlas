@@ -13,18 +13,18 @@ class LossWeights:
     stab_weight: float = 1e-4
 
 
-def _resolve_loss(kind: str, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    if kind == 'mse':
+def _resolve_loss(loss_kind: str, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    if loss_kind == 'mse':
         return F.mse_loss(pred, target)
-    raise ValueError(f'Unsupported loss_kind: {kind}')
+    raise ValueError(f'Unsupported loss_kind: {loss_kind}')
 
 
-def prediction_loss(pred: torch.Tensor, target: torch.Tensor, loss_kind: str = 'mse') -> torch.Tensor:
-    return _resolve_loss(loss_kind, pred, target)
+def prediction_loss(pred: torch.Tensor, target: torch.Tensor, loss_kind: str = 'mse', kind: str | None = None) -> torch.Tensor:
+    return _resolve_loss(kind or loss_kind, pred, target)
 
 
-def semantic_loss(mapped_pred: torch.Tensor, loss_target: torch.Tensor, loss_kind: str = 'mse') -> torch.Tensor:
-    return _resolve_loss(loss_kind, mapped_pred, loss_target)
+def semantic_loss(mapped_pred: torch.Tensor, loss_target: torch.Tensor, loss_kind: str = 'mse', kind: str | None = None) -> torch.Tensor:
+    return _resolve_loss(kind or loss_kind, mapped_pred, loss_target)
 
 
 def stability_loss(phi_map, pred: torch.Tensor) -> torch.Tensor:

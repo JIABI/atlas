@@ -1,4 +1,0 @@
-name: video_unet_small
-base_channels: 32
-in_channels: 3
-out_channels: 3

@@ -42,16 +42,17 @@ def _save_atlas_table(df: pd.DataFrame, output_dir: Path) -> Path:
     parquet_path = output_dir / 'atlas.parquet'
     csv_path = output_dir / 'atlas.csv'
     pkl_path = output_dir / 'atlas.pkl'
-    marker_path = output_dir / 'atlas_export_fallback.txt'
     df.to_csv(csv_path, index=False)
     df.to_pickle(pkl_path)
     try:
         df.to_parquet(parquet_path, index=False)
-        if marker_path.exists():
-            marker_path.unlink()
         return parquet_path
     except Exception as exc:
-        marker_path.write_text(f'parquet unavailable, fallback used: {type(exc).__name__}\n', encoding='utf-8')
+        parquet_path.write_text(
+            'parquet export unavailable; use atlas.pkl or atlas.csv for full table data. '
+            f'error={type(exc).__name__}\n',
+            encoding='utf-8',
+        )
         return pkl_path
 
 

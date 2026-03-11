@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import math
 import time
 
 import numpy as np
@@ -67,16 +68,19 @@ class OneStepTrainer:
         self.ckpt_dir = ensure_dir(self.output_dir / 'checkpoints')
         self.samples_dir = ensure_dir(self.output_dir / 'samples')
         self.mixed_precision = bool(mixed_precision and device.type == 'cuda')
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.mixed_precision)
         self.save_every = int(save_every)
         self.ema_model = EMA(self.model, ema_decay) if ema_decay > 0 else None
-        self.ema_phi = EMA(self.phi_map, ema_decay) if ema_decay > 0 else None
+        self.ema_phi_map = EMA(self.phi_map, ema_decay) if ema_decay > 0 else None
+        if hasattr(torch, 'amp') and hasattr(torch.amp, 'GradScaler'):
+            self.scaler = torch.amp.GradScaler('cuda', enabled=self.mixed_precision)
+            self._autocast = lambda: torch.amp.autocast('cuda', enabled=self.mixed_precision)
+        else:
+            self.scaler = torch.cuda.amp.GradScaler(enabled=self.mixed_precision)
+            self._autocast = lambda: torch.cuda.amp.autocast(enabled=self.mixed_precision)
 
     def _state(self, x0: torch.Tensor, t: torch.Tensor) -> dict[str, torch.Tensor]:
         xt, eps = self.corruption.sample_xt(x0, t)
-        state = self.corruption.primitives(x0, xt, eps, t)
-        state['t_scalar'] = t
-        return state
+        return self.corruption.primitives(x0, xt, eps, t)
 
     def _checkpoint(self, name: str, step: int, best_val: float) -> Path:
         path = self.ckpt_dir / name
@@ -87,16 +91,29 @@ class OneStepTrainer:
             'step': step,
             'best_val': best_val,
             'ema_model': self.ema_model.shadow if self.ema_model else None,
-            'ema_phi': self.ema_phi.shadow if self.ema_phi else None,
+            'ema_phi_map': self.ema_phi_map.shadow if self.ema_phi_map else None,
         }, path)
         return path
 
+    def load_ema_state(self, ckpt: dict[str, Any]) -> bool:
+        ema_model = ckpt.get('ema_model')
+        ema_phi = ckpt.get('ema_phi_map', ckpt.get('ema_phi'))
+        if not (ema_model and ema_phi):
+            return False
+        if self.ema_model is None:
+            self.ema_model = EMA(self.model, decay=0.999)
+        if self.ema_phi_map is None:
+            self.ema_phi_map = EMA(self.phi_map, decay=0.999)
+        self.ema_model.shadow = {k: v.detach().clone() for k, v in ema_model.items()}
+        self.ema_phi_map.shadow = {k: v.detach().clone() for k, v in ema_phi.items()}
+        return True
+
     def _swap_to_ema(self):
-        if not (self.ema_model and self.ema_phi):
+        if not (self.ema_model and self.ema_phi_map):
             return None
         backup = (self.model.state_dict(), self.phi_map.state_dict())
         self.ema_model.copy_to(self.model)
-        self.ema_phi.copy_to(self.phi_map)
+        self.ema_phi_map.copy_to(self.phi_map)
         return backup
 
     def _restore_from_backup(self, backup):
@@ -121,8 +138,8 @@ class OneStepTrainer:
         self.model.train()
         self.phi_map.train()
         step = 0
-        losses = []
-        grad_norms = []
+        losses: list[float] = []
+        grad_norms: list[float] = []
         best_val = float('inf')
         best_path = self.ckpt_dir / 'best.pt'
         last_eval: dict[str, Any] = {}
@@ -141,7 +158,7 @@ class OneStepTrainer:
             pred_target = construct_target(prediction_spec, state)
             loss_target = construct_target(loss_spec, state)
 
-            with torch.cuda.amp.autocast(enabled=self.mixed_precision):
+            with self._autocast():
                 z_hat = self.model(state['xt'], t)
                 mapped = self.phi_map(z_hat, t)
                 lp = prediction_loss(z_hat, pred_target, loss_kind=self.loss_kind)
@@ -164,9 +181,9 @@ class OneStepTrainer:
                 grad_norm = torch.nn.utils.clip_grad_norm_(list(self.model.parameters()) + list(self.phi_map.parameters()), grad_clip)
                 self.optimizer.step()
 
-            if self.ema_model and self.ema_phi:
+            if self.ema_model and self.ema_phi_map:
                 self.ema_model.update(self.model)
-                self.ema_phi.update(self.phi_map)
+                self.ema_phi_map.update(self.phi_map)
 
             losses.append(float(total.item()))
             grad_norms.append(float(grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm))
@@ -179,13 +196,15 @@ class OneStepTrainer:
                 last_eval = self.evaluate(loader, prediction_spec, loss_spec, collapse_threshold, tail_percentiles, max_batches=num_eval_batches, save_samples=save_samples, step=step + 1)
                 self._restore_from_backup(backup)
                 save_json(last_eval, self.output_dir / 'last_eval.json')
+                self._checkpoint('last.pt', step + 1, best_val)
                 val_key = last_eval['quality']['mse']
                 if val_key < best_val:
                     best_val = val_key
                     self._checkpoint('best.pt', step + 1, best_val)
-            self._checkpoint('last.pt', step + 1, best_val)
             step += 1
 
+        # always finalize last checkpoint once at end
+        self._checkpoint('last.pt', max_steps, best_val)
         summary = {
             'mode': mode,
             'prediction_spec': spec_to_dict(prediction_spec),
@@ -203,8 +222,20 @@ class OneStepTrainer:
             'best_checkpoint': str(best_path),
             'grad_var': float(torch.tensor(grad_norms).var().item()) if len(grad_norms) > 1 else 0.0,
         }
-        summary['pathology']['early_grad_var'] = summary['grad_var']
-        summary['pathology']['pathology_score'] = pathology_score(summary['pathology'])
+        pathology = dict(summary['pathology'])
+        pathology.setdefault('support_pix', 0.0)
+        pathology.setdefault('support_perc', 0.0)
+        pathology.setdefault('support_ssl', 0.0)
+        pathology.setdefault('support_deviation', 0.0)
+        pathology.setdefault('rho_nor', 0.0)
+        pathology.setdefault('normal_burden', pathology['rho_nor'])
+        pathology.setdefault('conditioning', 0.0)
+        pathology.setdefault('covariance_conditioning', pathology['conditioning'])
+        pathology.setdefault('relative_shift', 0.0)
+        pathology.setdefault('prediction_sensitivity', 0.0)
+        pathology['early_grad_var'] = summary['grad_var']
+        pathology['pathology_score'] = pathology_score(pathology)
+        summary['pathology'] = pathology
         save_json(summary, self.output_dir / 'summary.json')
         return summary
 
@@ -255,7 +286,7 @@ class OneStepTrainer:
         tail = summarize_tail(mse, collapse_threshold, tail_percentiles)
 
         if save_samples:
-            self._save_samples_grid(recon_cat[:16], self.samples_dir / f'samples_step_{step:06d}.png')
+            self._save_comparison_samples(x0_cat[:16], recon_cat[:16], self.samples_dir / f'samples_step_{step:06d}.png')
 
         return {
             'quality': {
@@ -268,16 +299,25 @@ class OneStepTrainer:
             'pathology': pathology,
         }
 
-    def _save_samples_grid(self, images: torch.Tensor, path: Path) -> None:
-        images = ((images.detach().cpu().clamp(-1, 1) + 1.0) * 127.5).to(torch.uint8)
+    def _save_comparison_samples(self, x0: torch.Tensor, x0_hat: torch.Tensor, path: Path) -> None:
+        pair = torch.cat([x0.detach().cpu(), x0_hat.detach().cpu()], dim=0).clamp(-1, 1)
+        try:
+            from torchvision.utils import save_image
+            nrow = max(1, int(math.sqrt(x0.shape[0])))
+            save_image((pair + 1.0) / 2.0, path, nrow=nrow)
+            return
+        except Exception:
+            pass
+
+        images = ((pair + 1.0) * 127.5).to(torch.uint8)
         n = images.shape[0]
-        cols = int(np.ceil(np.sqrt(n)))
+        cols = max(1, int(math.sqrt(x0.shape[0])))
         rows = int(np.ceil(n / cols))
         c, h, w = images.shape[1:]
         grid = torch.zeros(c, rows * h, cols * w, dtype=torch.uint8)
         for i in range(n):
             r, col = divmod(i, cols)
-            grid[:, r*h:(r+1)*h, col*w:(col+1)*w] = images[i]
+            grid[:, r * h:(r + 1) * h, col * w:(col + 1) * w] = images[i]
         arr = grid.permute(1, 2, 0).numpy()
         if c == 1:
             arr = arr[:, :, 0]

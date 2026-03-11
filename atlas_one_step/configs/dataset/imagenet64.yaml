@@ -1,4 +1,0 @@
-name: imagenet64
-root: data/imagenet64
-resolution: 64
-batch_size: 16

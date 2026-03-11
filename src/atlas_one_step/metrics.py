@@ -29,9 +29,14 @@ def feature_fd(real: torch.Tensor, fake: torch.Tensor) -> float:
 def summarize_tail(errors: torch.Tensor, collapse_threshold: float, percentiles: list[int]) -> dict[str, float]:
     err_np = errors.detach().cpu().numpy()
     out = {
-        'worst_k_score': float(np.sort(err_np)[-max(1, len(err_np)//10):].mean()),
+        'worst_k_score': float(np.sort(err_np)[-max(1, len(err_np) // 10):].mean()),
         'rare_failure_rate': float((err_np > collapse_threshold).mean()),
+        'mean': float(err_np.mean()),
+        'std': float(err_np.std()),
     }
+    out['cv'] = float(out['std'] / max(out['mean'], 1e-8))
     for p in percentiles:
         out[f'percentile_{p}'] = float(np.percentile(err_np, p))
+    if 50 in percentiles and 90 in percentiles:
+        out['tail_gap_90_50'] = float(out['percentile_90'] - out['percentile_50'])
     return out

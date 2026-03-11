@@ -43,4 +43,4 @@ class DiffusionLikeCorruption:
             sigma = sigma.unsqueeze(-1)
         u_t = alpha * eps - sigma * x0  # v-pred-like primitive
         r_t = x0 - xt
-        return {"x0": x0, "u_t": u_t, "r_t": r_t, "eps": eps, "xt": xt, "alpha": alpha, "sigma": sigma}
+        return {"x0": x0, "u_t": u_t, "r_t": r_t, "eps": eps, "xt": xt, "alpha": alpha, "sigma": sigma, "t_scalar": t}

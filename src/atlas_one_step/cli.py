@@ -204,9 +204,11 @@ def evaluate_cli(cfg_path: str, checkpoint: str, mode: str = 'coupled'):
     model.load_state_dict(ckpt['model'])
     phi.load_state_dict(ckpt['phi_map'])
     trainer = _make_trainer(cfg, model, phi, corr, opt, device, Path(checkpoint).parent.parent, loss_weights)
+    use_ema = trainer.load_ema_state(ckpt)
 
     loss_spec = _default_loss_target_from_cfg(cfg)
     pred_spec = loss_spec
+    backup = trainer._swap_to_ema() if use_ema else None
     eval_metrics = trainer.evaluate(
         bundle.loader,
         pred_spec,
@@ -216,6 +218,8 @@ def evaluate_cli(cfg_path: str, checkpoint: str, mode: str = 'coupled'):
         max_batches=int(cfg['eval'].get('num_eval_batches', 8)),
         save_samples=bool(cfg['eval'].get('save_samples', False)),
     )
+    if backup is not None:
+        trainer._restore_from_backup(backup)
     save_json(eval_metrics, Path(checkpoint).parent.parent / 'evaluation.json')
     logger.info('evaluation complete')
     return eval_metrics

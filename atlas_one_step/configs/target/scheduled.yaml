@@ -1,4 +1,0 @@
-name: scheduled
-family: scheduled
-basis: [1,t,t2]
-coeff_init: [0.3,0.3,0.4]

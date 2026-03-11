@@ -25,28 +25,32 @@ class TimeEmbedding(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, time_dim: int) -> None:
+    def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float = 0.0, groups: int = 8) -> None:
         super().__init__()
+        self.norm1 = nn.GroupNorm(min(groups, in_ch), in_ch)
         self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
         self.time_proj = nn.Linear(time_dim, out_ch)
+        self.norm2 = nn.GroupNorm(min(groups, out_ch), out_ch)
+        self.dropout = nn.Dropout(dropout)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
         self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
 
     def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
-        h = F.silu(self.conv1(x))
+        h = self.conv1(F.silu(self.norm1(x)))
         h = h + self.time_proj(t_emb)[:, :, None, None]
-        h = F.silu(self.conv2(h))
+        h = self.conv2(self.dropout(F.silu(self.norm2(h))))
         return h + self.skip(x)
 
 
 class TinyUNet(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, base_channels: int = 64, time_dim: int = 64) -> None:
+    def __init__(self, in_ch: int, out_ch: int, base_channels: int = 64, time_dim: int = 64, dropout: float = 0.0) -> None:
         super().__init__()
         self.time = TimeEmbedding(time_dim)
         self.in_conv = nn.Conv2d(in_ch, base_channels, 3, padding=1)
-        self.block1 = ResBlock(base_channels, base_channels, time_dim)
-        self.block2 = ResBlock(base_channels, base_channels, time_dim)
-        self.block3 = ResBlock(base_channels, base_channels, time_dim)
+        self.block1 = ResBlock(base_channels, base_channels, time_dim, dropout=dropout)
+        self.block2 = ResBlock(base_channels, base_channels, time_dim, dropout=dropout)
+        self.block3 = ResBlock(base_channels, base_channels, time_dim, dropout=dropout)
+        self.out_norm = nn.GroupNorm(min(8, base_channels), base_channels)
         self.out = nn.Conv2d(base_channels, out_ch, 3, padding=1)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
@@ -55,7 +59,7 @@ class TinyUNet(nn.Module):
         h = self.block1(h, t_emb)
         h = self.block2(h, t_emb)
         h = self.block3(h, t_emb)
-        return self.out(h)
+        return self.out(F.silu(self.out_norm(h)))
 
 
 class GNResBlock(nn.Module):
@@ -191,28 +195,32 @@ class AffinePhi(nn.Module):
 
 
 class ShallowPhi(nn.Module):
-    def __init__(self, channels: int, hidden_channels: int = 16) -> None:
+    def __init__(self, channels: int, hidden_channels: int = 16, spectral_bound: float = 1.0) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(channels, hidden_channels, 1),
-            nn.SiLU(),
-            nn.Conv2d(hidden_channels, channels, 1),
-        )
+        self.spectral_bound = float(spectral_bound)
+        self.conv1 = nn.Conv2d(channels, hidden_channels, 1)
+        self.act = nn.SiLU()
+        self.conv2 = nn.Conv2d(hidden_channels, channels, 1)
 
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        return z + 0.1 * self.net(z)
+        return z + 0.1 * self.conv2(self.act(self.conv1(z)))
 
     def regularization_loss(self) -> torch.Tensor:
-        reg = torch.tensor(0.0, device=next(self.parameters()).device)
+        l2 = torch.tensor(0.0, device=next(self.parameters()).device)
+        spectral_pen = torch.tensor(0.0, device=l2.device)
         for p in self.parameters():
-            reg = reg + p.pow(2).mean()
-        return 1e-4 * reg
+            l2 = l2 + p.pow(2).mean()
+        for layer in (self.conv1, self.conv2):
+            w = layer.weight.reshape(layer.weight.shape[0], -1)
+            sigma_max = torch.linalg.matrix_norm(w, ord=2)
+            spectral_pen = spectral_pen + torch.relu(sigma_max - self.spectral_bound).pow(2)
+        return 1e-4 * l2 + 1e-3 * spectral_pen
 
 
 def build_model(cfg: dict, channels: int) -> nn.Module:
     name = cfg.get('name', 'tiny_unet')
     if name == 'tiny_unet':
-        return TinyUNet(channels, channels, base_channels=int(cfg.get('base_channels', 64)), time_dim=int(cfg.get('time_dim', 64)))
+        return TinyUNet(channels, channels, base_channels=int(cfg.get('base_channels', 64)), time_dim=int(cfg.get('time_dim', 64)), dropout=float(cfg.get('dropout', 0.0)))
     if name == 'paper_unet':
         return PaperUNet(
             channels,
@@ -235,5 +243,5 @@ def build_phi_map(cfg: dict, channels: int) -> nn.Module:
     if typ == 'affine':
         return AffinePhi(channels)
     if typ == 'shallow':
-        return ShallowPhi(channels, hidden_channels=int(cfg.get('hidden_channels', 16)))
+        return ShallowPhi(channels, hidden_channels=int(cfg.get('hidden_channels', 16)), spectral_bound=float(cfg.get('spectral_bound', 1.0)))
     raise ValueError(f'Unsupported phi_map type: {typ}')
