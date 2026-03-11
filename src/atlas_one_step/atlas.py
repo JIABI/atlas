@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +19,8 @@ def load_summaries(sweep_dir: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f'No summary.json files found under {sweep_dir}')
     rows = []
     for p in paths:
-        row = pd.read_json(p).to_dict()
-        rows.append(row)
+        with p.open('r', encoding='utf-8') as f:
+            rows.append(json.load(f))
     return pd.json_normalize(rows)
 
 
@@ -42,12 +42,16 @@ def _save_atlas_table(df: pd.DataFrame, output_dir: Path) -> Path:
     parquet_path = output_dir / 'atlas.parquet'
     csv_path = output_dir / 'atlas.csv'
     pkl_path = output_dir / 'atlas.pkl'
+    marker_path = output_dir / 'atlas_export_fallback.txt'
     df.to_csv(csv_path, index=False)
     df.to_pickle(pkl_path)
     try:
         df.to_parquet(parquet_path, index=False)
+        if marker_path.exists():
+            marker_path.unlink()
         return parquet_path
-    except Exception:
+    except Exception as exc:
+        marker_path.write_text(f'parquet unavailable, fallback used: {type(exc).__name__}\n', encoding='utf-8')
         return pkl_path
 
 
@@ -67,8 +71,7 @@ def build_atlas(sweep_dir: str | Path, output_dir: str | Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     df = load_summaries(sweep_dir)
     df['phase_region'] = assign_phase_regions(df)
-    atlas_path = _save_atlas_table(df, output_dir)
-    return atlas_path
+    return _save_atlas_table(df, output_dir)
 
 
 def fit_surrogates(atlas_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
@@ -76,7 +79,6 @@ def fit_surrogates(atlas_path: str | Path, output_dir: str | Path) -> dict[str, 
     output_dir.mkdir(parents=True, exist_ok=True)
     df = _load_atlas_table(atlas_path)
     df['target_family'] = df['prediction_spec.family'].fillna(df['loss_spec.family'])
-    # Label-only
     X_label = df[['target_family']].copy()
     y_cls = df['phase_region']
     y_reg = df['quality.mse']
@@ -86,10 +88,12 @@ def fit_surrogates(atlas_path: str | Path, output_dir: str | Path) -> dict[str, 
     clf_label.fit(X_label, y_cls)
     reg_label.fit(X_label, y_reg)
 
-    # Diagnostics-only
     diag_cols = [
         'pathology.support_pix', 'pathology.support_perc', 'pathology.support_ssl',
-        'pathology.rho_nor', 'pathology.conditioning', 'pathology.pathology_score', 'grad_var'
+        'pathology.support_deviation', 'pathology.rho_nor', 'pathology.normal_burden',
+        'pathology.conditioning', 'pathology.covariance_conditioning',
+        'pathology.relative_shift', 'pathology.prediction_sensitivity',
+        'pathology.pathology_score', 'grad_var'
     ]
     diag_cols = [c for c in diag_cols if c in df.columns]
     X_diag = df[diag_cols].fillna(0.0)
@@ -98,7 +102,6 @@ def fit_surrogates(atlas_path: str | Path, output_dir: str | Path) -> dict[str, 
     clf_diag.fit(X_diag, y_cls)
     reg_diag.fit(X_diag, y_reg)
 
-    # Combined
     X_comb = pd.concat([X_label, X_diag], axis=1)
     comb_pre = ColumnTransformer([
         ('fam', OneHotEncoder(handle_unknown='ignore'), ['target_family']),

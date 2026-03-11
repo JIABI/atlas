@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
-from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -60,6 +58,117 @@ class TinyUNet(nn.Module):
         return self.out(h)
 
 
+class GNResBlock(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float = 0.0, groups: int = 8) -> None:
+        super().__init__()
+        g1 = min(groups, in_ch)
+        g2 = min(groups, out_ch)
+        self.norm1 = nn.GroupNorm(g1, in_ch)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.time_proj = nn.Sequential(nn.SiLU(), nn.Linear(time_dim, out_ch))
+        self.norm2 = nn.GroupNorm(g2, out_ch)
+        self.dropout = nn.Dropout(dropout)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+        h = self.conv1(F.silu(self.norm1(x)))
+        h = h + self.time_proj(t_emb)[:, :, None, None]
+        h = self.conv2(self.dropout(F.silu(self.norm2(h))))
+        return h + self.skip(x)
+
+
+class SelfAttention2d(nn.Module):
+    def __init__(self, channels: int, heads: int = 4, groups: int = 8) -> None:
+        super().__init__()
+        self.norm = nn.GroupNorm(min(groups, channels), channels)
+        self.attn = nn.MultiheadAttention(channels, heads, batch_first=True)
+        self.proj = nn.Conv2d(channels, channels, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        y = self.norm(x).reshape(b, c, h * w).permute(0, 2, 1)
+        y, _ = self.attn(y, y, y, need_weights=False)
+        y = y.permute(0, 2, 1).reshape(b, c, h, w)
+        return x + self.proj(y)
+
+
+class PaperUNet(nn.Module):
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        base_channels: int = 96,
+        time_dim: int = 128,
+        channel_mults: tuple[int, ...] = (1, 2, 2),
+        num_res_blocks: int = 2,
+        use_attention: bool = True,
+        attention_heads: int = 4,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.time = TimeEmbedding(time_dim)
+        self.in_conv = nn.Conv2d(in_ch, base_channels, 3, padding=1)
+
+        self.downs = nn.ModuleList()
+        self.downsamples = nn.ModuleList()
+        ch = base_channels
+        self.skip_channels: list[int] = []
+        for i, mult in enumerate(channel_mults):
+            outc = base_channels * mult
+            blocks = nn.ModuleList()
+            for _ in range(num_res_blocks):
+                blocks.append(GNResBlock(ch, outc, time_dim, dropout=dropout))
+                ch = outc
+            self.downs.append(blocks)
+            self.skip_channels.append(ch)
+            self.downsamples.append(nn.Conv2d(ch, ch, 3, stride=2, padding=1) if i < len(channel_mults) - 1 else nn.Identity())
+
+        self.mid1 = GNResBlock(ch, ch, time_dim, dropout=dropout)
+        self.mid_attn = SelfAttention2d(ch, heads=attention_heads) if use_attention else nn.Identity()
+        self.mid2 = GNResBlock(ch, ch, time_dim, dropout=dropout)
+
+        self.ups = nn.ModuleList()
+        self.upsamples = nn.ModuleList()
+        for i, mult in reversed(list(enumerate(channel_mults))):
+            outc = base_channels * mult
+            blocks = nn.ModuleList()
+            blocks.append(GNResBlock(ch + self.skip_channels[i], outc, time_dim, dropout=dropout))
+            ch = outc
+            for _ in range(num_res_blocks - 1):
+                blocks.append(GNResBlock(ch, outc, time_dim, dropout=dropout))
+                ch = outc
+            self.ups.append(blocks)
+            self.upsamples.append(nn.ConvTranspose2d(ch, ch, 4, stride=2, padding=1) if i > 0 else nn.Identity())
+
+        self.out_norm = nn.GroupNorm(min(8, ch), ch)
+        self.out = nn.Conv2d(ch, out_ch, 3, padding=1)
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        t_emb = self.time(t)
+        h = self.in_conv(x)
+        skips: list[torch.Tensor] = []
+
+        for blocks, down in zip(self.downs, self.downsamples):
+            for block in blocks:
+                h = block(h, t_emb)
+            skips.append(h)
+            h = down(h)
+
+        h = self.mid2(self.mid_attn(self.mid1(h, t_emb)), t_emb)
+
+        for blocks, up in zip(self.ups, self.upsamples):
+            skip = skips.pop()
+            if h.shape[-2:] != skip.shape[-2:]:
+                h = F.interpolate(h, size=skip.shape[-2:], mode='nearest')
+            h = torch.cat([h, skip], dim=1)
+            for block in blocks:
+                h = block(h, t_emb)
+            h = up(h)
+
+        return self.out(F.silu(self.out_norm(h)))
+
+
 class IdentityPhi(nn.Module):
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         return z
@@ -102,9 +211,21 @@ class ShallowPhi(nn.Module):
 
 def build_model(cfg: dict, channels: int) -> nn.Module:
     name = cfg.get('name', 'tiny_unet')
-    if name != 'tiny_unet':
-        raise ValueError(f'Unsupported model: {name}')
-    return TinyUNet(channels, channels, base_channels=int(cfg.get('base_channels', 64)), time_dim=int(cfg.get('time_dim', 64)))
+    if name == 'tiny_unet':
+        return TinyUNet(channels, channels, base_channels=int(cfg.get('base_channels', 64)), time_dim=int(cfg.get('time_dim', 64)))
+    if name == 'paper_unet':
+        return PaperUNet(
+            channels,
+            channels,
+            base_channels=int(cfg.get('base_channels', 96)),
+            time_dim=int(cfg.get('time_dim', 128)),
+            channel_mults=tuple(int(v) for v in cfg.get('channel_mults', [1, 2, 2])),
+            num_res_blocks=int(cfg.get('num_res_blocks', 2)),
+            use_attention=bool(cfg.get('use_attention', True)),
+            attention_heads=int(cfg.get('attention_heads', 4)),
+            dropout=float(cfg.get('dropout', 0.0)),
+        )
+    raise ValueError(f'Unsupported model: {name}')
 
 
 def build_phi_map(cfg: dict, channels: int) -> nn.Module:

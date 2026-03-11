@@ -63,8 +63,18 @@ def select_target(
     semantic_gap_weight: float = 0.5,
     complexity_weight: float = 0.05,
     schedule_basis_order: int = 3,
+    alpha_min: float = 0.05,
+    alpha_max: float = 0.95,
+    custom_alphas: list[float] | None = None,
 ) -> dict[str, Any]:
-    candidates = sample_target_specs(family, num_points, schedule_basis_order=schedule_basis_order)
+    candidates = sample_target_specs(
+        family,
+        num_points,
+        schedule_basis_order=schedule_basis_order,
+        alpha_min=alpha_min,
+        alpha_max=alpha_max,
+        custom_alphas=custom_alphas,
+    )
     ranked = rank_candidates(candidates, surrogate_path, loss_target, semantic_gap_weight, complexity_weight)
     selected = {'selected': ranked[0], 'topk': ranked[:5]}
     save_json(selected, output_path)
