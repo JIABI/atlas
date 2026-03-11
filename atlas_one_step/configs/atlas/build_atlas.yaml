@@ -1,0 +1,3 @@
+name: build_atlas
+seeds: [0,1]
+out_dir: outputs/atlas/build_atlas
