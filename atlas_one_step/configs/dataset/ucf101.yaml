@@ -1,6 +1,0 @@
-name: ucf101
-root: data/ucf101
-resolution: 128
-batch_size: 2
-frames: 16
-enabled: false

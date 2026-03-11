@@ -13,18 +13,18 @@ def psnr_from_mse(mse: torch.Tensor) -> torch.Tensor:
 
 
 def feature_fd(real: torch.Tensor, fake: torch.Tensor) -> float:
-    # Lightweight Fréchet distance proxy on average-pooled features.
-    real_f = torch.nn.functional.adaptive_avg_pool2d(real, (8, 8)).flatten(1).detach().cpu().numpy()
-    fake_f = torch.nn.functional.adaptive_avg_pool2d(fake, (8, 8)).flatten(1).detach().cpu().numpy()
+    """Cheap Fréchet-style proxy using pooled mean/variance statistics.
+
+    We intentionally avoid expensive matrix square-root/eigendecomposition calls so the
+    full atlas smoke pipeline remains responsive on CPU-only environments.
+    """
+    real_f = torch.nn.functional.adaptive_avg_pool2d(real, (4, 4)).flatten(1)
+    fake_f = torch.nn.functional.adaptive_avg_pool2d(fake, (4, 4)).flatten(1)
     mu_r, mu_f = real_f.mean(0), fake_f.mean(0)
-    cov_r = np.cov(real_f, rowvar=False)
-    cov_f = np.cov(fake_f, rowvar=False)
-    diff = mu_r - mu_f
-    # Numerically stable trace sqrt approximation via eigen decomposition.
-    prod = cov_r @ cov_f
-    eigvals = np.linalg.eigvals(prod)
-    sqrt_trace = np.sum(np.sqrt(np.clip(np.real(eigvals), 0, None)))
-    return float(diff @ diff + np.trace(cov_r) + np.trace(cov_f) - 2 * sqrt_trace)
+    var_r, var_f = real_f.var(0, unbiased=False), fake_f.var(0, unbiased=False)
+    mean_term = (mu_r - mu_f).pow(2).mean()
+    var_term = (torch.sqrt(var_r + 1e-8) - torch.sqrt(var_f + 1e-8)).pow(2).mean()
+    return float((mean_term + var_term).item())
 
 
 def summarize_tail(errors: torch.Tensor, collapse_threshold: float, percentiles: list[int]) -> dict[str, float]:

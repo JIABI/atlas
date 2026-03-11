@@ -1,4 +1,0 @@
-name: cifar10
-root: data/cifar10
-resolution: 64
-batch_size: 16

@@ -1,4 +1,4 @@
-seed: 11
+seed: 20
 output_root: outputs/cifar10_train
 
 dataset:

@@ -18,6 +18,15 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    # Keep CPU smoke runs responsive and avoid pathological MKLDNN thread scheduling.
+    try:
+        torch.set_num_threads(int(os.environ.get("ATLAS_NUM_THREADS", "1")))
+    except Exception:
+        pass
+    try:
+        torch.backends.mkldnn.enabled = False
+    except Exception:
+        pass
 
 
 def setup_logger(name: str = "atlas") -> logging.Logger:

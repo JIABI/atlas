@@ -21,6 +21,26 @@ from .utils import ensure_dir, infer_device, save_json, set_seed, setup_logger
 logger = setup_logger()
 
 
+def _default_loss_target_from_cfg(cfg: dict) -> TargetSpec:
+    """Return a sensible default loss target when the config omits one."""
+    lt_cfg = cfg.get('loss_target')
+    if isinstance(lt_cfg, dict) and 'family' in lt_cfg:
+        return TargetSpec(family=lt_cfg['family'], params={k: v for k, v in lt_cfg.items() if k != 'family'})
+
+    sweep_family = cfg.get('sweep', {}).get('family', 'line_x0_u')
+    if sweep_family in {'line_x0_u', 'line_x0_r', 'line_x0_eps'}:
+        return TargetSpec(family=sweep_family, params={'alpha': float(cfg.get('default_alpha', 0.6))})
+    if sweep_family == 'simplex':
+        return TargetSpec(family='simplex', params={'alpha': 0.6, 'beta': 0.25, 'gamma': 0.15})
+    if sweep_family == 'scheduled':
+        order = int(cfg.get('selection', {}).get('schedule_basis_order', 3))
+        ax = [0.8] + [0.0] * (order - 1)
+        bu = [0.15] + [0.0] * (order - 1)
+        cr = [0.05] + [0.0] * (order - 1)
+        return TargetSpec(family='scheduled', params={'ax': ax, 'bu': bu, 'cr': cr})
+    return TargetSpec(family='line_x0_u', params={'alpha': 0.6})
+
+
 def _common_from_config(cfg: dict):
     set_seed(int(cfg.get('seed', 0)))
     bundle = build_dataset_bundle(cfg['dataset'])
@@ -43,8 +63,22 @@ def run_sweep(cfg_path: str):
     bundle, device, corr, _, _, _, loss_weights = _common_from_config(cfg)
     output_root = ensure_dir(cfg['output_root'])
     sweep_dir = ensure_dir(output_root / 'sweeps')
+    #family = cfg['sweep']['family']
+    #specs = sample_target_specs(family, int(cfg['sweep']['num_points']), int(cfg.get('selection', {}).get('schedule_basis_order', 3)))
     family = cfg['sweep']['family']
-    specs = sample_target_specs(family, int(cfg['sweep']['num_points']), int(cfg.get('selection', {}).get('schedule_basis_order', 3)))
+    sweep_cfg = cfg['sweep']
+
+    if family in {'line_x0_u', 'line_x0_r', 'line_x0_eps'} and 'custom_alphas' in sweep_cfg:
+        specs = [
+            TargetSpec(family=family, params={'alpha': float(a)})
+            for a in sweep_cfg['custom_alphas']
+        ]
+    else:
+        specs = sample_target_specs(
+            family,
+            int(sweep_cfg['num_points']),
+            int(cfg.get('selection', {}).get('schedule_basis_order', 3))
+        )
     max_steps = int(cfg['sweep']['max_steps_per_target'])
     for seed in cfg['sweep']['seeds']:
         for i, spec in enumerate(specs):
@@ -77,6 +111,7 @@ def build_atlas_cli(cfg_path: str, sweep_dir: str | None = None):
     sweep_dir = sweep_dir or str(output_root / 'sweeps')
     atlas_path = build_atlas(sweep_dir, output_root / 'atlas')
     logger.info('atlas saved to %s', atlas_path)
+    return atlas_path
 
 
 def fit_surrogate_cli(atlas_path: str):
@@ -87,8 +122,7 @@ def fit_surrogate_cli(atlas_path: str):
 
 def select_target_cli(atlas_path: str, surrogate_path: str, output_path: str, cfg_path: str):
     cfg = load_yaml(cfg_path)
-    lt_cfg = cfg['loss_target']
-    loss_target = TargetSpec(family=lt_cfg['family'], params={k: v for k, v in lt_cfg.items() if k != 'family'})
+    loss_target = _default_loss_target_from_cfg(cfg)
     out = select_target(
         surrogate_path=surrogate_path,
         output_path=output_path,
@@ -110,8 +144,7 @@ def train_cli(cfg_path: str, mode: str, selected_target: str | None = None):
     out_dir = ensure_dir(output_root / mode)
     trainer = OneStepTrainer(model, phi, corr, opt, device, out_dir, loss_weights)
 
-    lt_cfg = cfg['loss_target']
-    loss_spec = TargetSpec(family=lt_cfg['family'], params={k: v for k, v in lt_cfg.items() if k != 'family'})
+    loss_spec = _default_loss_target_from_cfg(cfg)
 
     if mode == 'coupled':
         pred_spec = loss_spec
@@ -151,8 +184,7 @@ def evaluate_cli(cfg_path: str, checkpoint: str, mode: str = 'coupled'):
     phi.load_state_dict(ckpt['phi_map'])
     trainer = OneStepTrainer(model, phi, corr, opt, device, Path(checkpoint).parent.parent, loss_weights)
 
-    lt_cfg = cfg['loss_target']
-    loss_spec = TargetSpec(family=lt_cfg['family'], params={k: v for k, v in lt_cfg.items() if k != 'family'})
+    loss_spec = _default_loss_target_from_cfg(cfg)
     pred_spec = loss_spec
     eval_metrics = trainer.evaluate(bundle.loader, pred_spec, loss_spec, float(cfg['eval']['collapse_threshold']), list(cfg['eval']['tail_percentiles']))
     save_json(eval_metrics, Path(checkpoint).parent.parent / 'evaluation.json')
@@ -164,16 +196,11 @@ def smoke_test(cfg_path: str):
     cfg = load_yaml(cfg_path)
     root = ensure_dir(cfg['output_root'])
     run_sweep(cfg_path)
-    build_atlas_cli(cfg_path)
-    atlas_path = root / 'atlas' / 'atlas.parquet'
+    atlas_path = build_atlas_cli(cfg_path)
     fit_surrogate_cli(str(atlas_path))
     select_target_cli(str(atlas_path), str(root / 'atlas' / 'surrogate.joblib'), str(root / 'atlas' / 'selected_target.json'), cfg_path)
     train_cli(cfg_path, 'coupled')
-    # create temporary train config for atlas-guided
-    tmp_cfg = dict(cfg)
-    tmp_cfg['loss_target'] = {'family': 'line_x0_u', 'alpha': 0.6}
-    save_yaml(tmp_cfg, root / 'tmp_train.yaml')
-    train_cli(str(root / 'tmp_train.yaml'), 'atlas_guided', selected_target=str(root / 'atlas' / 'selected_target.json'))
+    train_cli(cfg_path, 'atlas_guided', selected_target=str(root / 'atlas' / 'selected_target.json'))
     logger.info('smoke test completed successfully')
 
 

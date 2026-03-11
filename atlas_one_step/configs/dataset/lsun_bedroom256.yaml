@@ -1,4 +1,0 @@
-name: lsun_bedroom256
-root: data/lsun/bedroom
-resolution: 256
-batch_size: 4

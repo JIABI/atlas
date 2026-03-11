@@ -6,8 +6,8 @@ dataset:
   root: data
   channels: 3
   image_size: 32
-  num_samples: 256
-  batch_size: 16
+  num_samples: 64
+  batch_size: 8
 
 corruption:
   name: diffusion_like
@@ -16,12 +16,11 @@ corruption:
 
 model:
   name: tiny_unet
-  base_channels: 32
-  time_dim: 32
+  base_channels: 8
+  time_dim: 8
 
 phi_map:
-  type: shallow
-  hidden_channels: 16
+  type: affine
 
 loss:
   pred_weight: 1.0
@@ -30,15 +29,15 @@ loss:
 
 train:
   lr: 1.0e-3
-  max_steps: 40
-  eval_every: 20
+  max_steps: 4
+  eval_every: 2
   grad_clip: 1.0
 
 sweep:
   family: line_x0_u
-  num_points: 5
-  max_steps_per_target: 20
-  seeds: [1, 2]
+  num_points: 11
+  max_steps_per_target: 10
+  seeds: [1,2]
 
 selection:
   semantic_gap_weight: 0.5
@@ -49,3 +48,11 @@ selection:
 eval:
   collapse_threshold: 0.35
   tail_percentiles: [95, 99]
+
+loss_target:
+  family: line_x0_u
+  alpha: 0.6
+
+manual_prediction_target:
+  family: line_x0_r
+  alpha: 0.75

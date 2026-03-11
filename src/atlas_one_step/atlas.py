@@ -38,21 +38,43 @@ def assign_phase_regions(df: pd.DataFrame, mse_threshold: float = 0.2, collapse_
     return pd.Series(region, index=df.index)
 
 
+def _save_atlas_table(df: pd.DataFrame, output_dir: Path) -> Path:
+    parquet_path = output_dir / 'atlas.parquet'
+    csv_path = output_dir / 'atlas.csv'
+    pkl_path = output_dir / 'atlas.pkl'
+    df.to_csv(csv_path, index=False)
+    df.to_pickle(pkl_path)
+    try:
+        df.to_parquet(parquet_path, index=False)
+        return parquet_path
+    except Exception:
+        return pkl_path
+
+
+def _load_atlas_table(atlas_path: str | Path) -> pd.DataFrame:
+    atlas_path = Path(atlas_path)
+    if atlas_path.suffix == '.parquet':
+        return pd.read_parquet(atlas_path)
+    if atlas_path.suffix == '.pkl':
+        return pd.read_pickle(atlas_path)
+    if atlas_path.suffix == '.csv':
+        return pd.read_csv(atlas_path)
+    raise ValueError(f'Unsupported atlas file format: {atlas_path}')
+
+
 def build_atlas(sweep_dir: str | Path, output_dir: str | Path) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     df = load_summaries(sweep_dir)
     df['phase_region'] = assign_phase_regions(df)
-    atlas_path = output_dir / 'atlas.parquet'
-    df.to_parquet(atlas_path, index=False)
-    df.to_csv(output_dir / 'atlas.csv', index=False)
+    atlas_path = _save_atlas_table(df, output_dir)
     return atlas_path
 
 
 def fit_surrogates(atlas_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    df = pd.read_parquet(atlas_path)
+    df = _load_atlas_table(atlas_path)
     df['target_family'] = df['prediction_spec.family'].fillna(df['loss_spec.family'])
     # Label-only
     X_label = df[['target_family']].copy()
