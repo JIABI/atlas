@@ -1,0 +1,4 @@
+name: lsun_cat256
+root: data/lsun/cat
+resolution: 256
+batch_size: 4
