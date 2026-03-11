@@ -8,16 +8,15 @@ def mse_per_sample(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return ((x - y) ** 2).flatten(1).mean(dim=1)
 
 
+def mae_per_sample(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return (x - y).abs().flatten(1).mean(dim=1)
+
+
 def psnr_from_mse(mse: torch.Tensor) -> torch.Tensor:
     return -10.0 * torch.log10(mse.clamp_min(1e-8))
 
 
 def feature_fd(real: torch.Tensor, fake: torch.Tensor) -> float:
-    """Cheap Fréchet-style proxy using pooled mean/variance statistics.
-
-    We intentionally avoid expensive matrix square-root/eigendecomposition calls so the
-    full atlas smoke pipeline remains responsive on CPU-only environments.
-    """
     real_f = torch.nn.functional.adaptive_avg_pool2d(real, (4, 4)).flatten(1)
     fake_f = torch.nn.functional.adaptive_avg_pool2d(fake, (4, 4)).flatten(1)
     mu_r, mu_f = real_f.mean(0), fake_f.mean(0)

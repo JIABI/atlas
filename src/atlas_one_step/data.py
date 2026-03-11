@@ -129,5 +129,16 @@ def build_dataset_bundle(cfg: dict[str, Any]) -> DatasetBundle:
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True)
+    num_workers = int(cfg.get('num_workers', 0))
+    pin_memory = bool(cfg.get('pin_memory', False))
+    persistent_workers = bool(cfg.get('persistent_workers', num_workers > 0))
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=(persistent_workers if num_workers > 0 else False),
+        drop_last=True,
+    )
     return DatasetBundle(dataset=ds, loader=loader, channels=channels, image_size=image_size)

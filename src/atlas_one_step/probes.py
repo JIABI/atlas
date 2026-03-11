@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import torch
 
@@ -35,6 +33,7 @@ def support_deviation(target: torch.Tensor, x0: torch.Tensor) -> dict[str, float
         'support_pix': float(pix.item()),
         'support_perc': float(perc.item()),
         'support_ssl': float(ssl.item()),
+        'support_deviation': float((pix + perc + ssl).div(3.0).item()),
     }
 
 
@@ -43,13 +42,13 @@ def normal_burden(target: torch.Tensor, x0: torch.Tensor) -> dict[str, float]:
         feats = _embed_ssl(x0)
         feats = feats - feats.mean(0, keepdim=True)
         q = min(4, feats.shape[0], feats.shape[1])
-        U, S, V = torch.pca_lowrank(feats, q=q)
+        _, _, V = torch.pca_lowrank(feats, q=q)
         basis = V[:, : max(1, min(2, V.shape[1]))]
         delta = _embed_ssl(target) - _embed_ssl(x0)
         proj = delta @ basis @ basis.T
         tan = (proj.pow(2).sum(dim=1) / (delta.pow(2).sum(dim=1) + 1e-8)).mean()
         nor = 1.0 - tan
-    return {'rho_tan': float(tan.item()), 'rho_nor': float(nor.item())}
+    return {'rho_tan': float(tan.item()), 'rho_nor': float(nor.item()), 'normal_burden': float(nor.item())}
 
 
 def covariance_conditioning(target: torch.Tensor) -> dict[str, float]:
@@ -57,19 +56,32 @@ def covariance_conditioning(target: torch.Tensor) -> dict[str, float]:
         feats = _embed_perceptual(target)
         feats = feats - feats.mean(0, keepdim=True)
         cov = feats.T @ feats / max(feats.shape[0] - 1, 1)
-        eig = torch.linalg.eigvalsh(cov + 1e-5 * torch.eye(cov.shape[0], device=cov.device))
-        eig = eig.real.clamp_min(1e-8)
+        eig = torch.linalg.eigvalsh(cov + 1e-5 * torch.eye(cov.shape[0], device=cov.device)).real.clamp_min(1e-8)
         cond = eig.max() / eig.min()
         anisotropy = eig.max() / eig.mean()
-    return {'jacobian_norm_proxy': float(eig.max().item()), 'anisotropy': float(anisotropy.item()), 'conditioning': float(cond.item())}
+    return {
+        'jacobian_norm_proxy': float(eig.max().item()),
+        'anisotropy': float(anisotropy.item()),
+        'conditioning': float(cond.item()),
+        'covariance_conditioning': float(cond.item()),
+    }
+
+
+def relative_shift_and_sensitivity(pred: torch.Tensor, target: torch.Tensor, x0: torch.Tensor) -> dict[str, float]:
+    with torch.no_grad():
+        delta = (pred - target).flatten(1)
+        base = (target - x0).flatten(1)
+        shift = delta.norm(dim=1).mean() / (base.norm(dim=1).mean() + 1e-8)
+        sens = delta.abs().mean() / (target.flatten(1).abs().mean() + 1e-8)
+    return {'relative_shift': float(shift.item()), 'prediction_sensitivity': float(sens.item())}
 
 
 def pathology_score(probes: dict[str, float]) -> float:
     return float(
-        0.25 * probes['support_pix']
-        + 0.25 * probes['support_perc']
-        + 0.20 * probes['support_ssl']
-        + 0.15 * probes['rho_nor']
-        + 0.10 * np.log1p(probes['conditioning'])
-        + 0.05 * np.log1p(probes.get('early_grad_var', 0.0))
+        0.22 * probes.get('support_deviation', probes.get('support_pix', 0.0))
+        + 0.20 * probes.get('normal_burden', probes.get('rho_nor', 0.0))
+        + 0.18 * np.log1p(probes.get('covariance_conditioning', probes.get('conditioning', 0.0)))
+        + 0.20 * probes.get('relative_shift', 0.0)
+        + 0.12 * probes.get('prediction_sensitivity', 0.0)
+        + 0.08 * np.log1p(probes.get('early_grad_var', 0.0))
     )
