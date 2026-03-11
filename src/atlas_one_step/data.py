@@ -41,7 +41,9 @@ class SyntheticPatternDataset(Dataset):
         ], axis=0)[: self.channels]
         blob = np.exp(-((xx - 0.3 * np.sin(phase)) ** 2 + (yy - 0.3 * np.cos(phase)) ** 2) / 0.1)
         img[0] += blob
-        img = img / np.max(np.abs(img))
+        img += 0.03 * rng.standard_normal(img.shape)
+        img = img / max(np.max(np.abs(img)), 1e-6)
+        img = np.clip(img, -1.0, 1.0)
         return torch.tensor(img, dtype=torch.float32)
 
 
@@ -129,5 +131,16 @@ def build_dataset_bundle(cfg: dict[str, Any]) -> DatasetBundle:
     else:
         raise ValueError(f"Unsupported dataset: {name}")
 
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True)
+    num_workers = int(cfg.get('num_workers', 0))
+    pin_memory = bool(cfg.get('pin_memory', torch.cuda.is_available()))
+    persistent_workers = bool(cfg.get('persistent_workers', False)) and num_workers > 0
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        drop_last=True,
+    )
     return DatasetBundle(dataset=ds, loader=loader, channels=channels, image_size=image_size)
