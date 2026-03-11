@@ -9,6 +9,7 @@ dataset:
   image_size: 32
   batch_size: 128
   num_workers: 4
+  pin_memory: true
 
 corruption:
   name: diffusion_like
@@ -17,9 +18,13 @@ corruption:
   num_time_samples: 8
 
 model:
-  name: tiny_unet
+  name: paper_unet
   base_channels: 128
-  time_dim: 64
+  time_dim: 128
+  channel_mults: [1, 2, 2]
+  num_res_blocks: 2
+  use_attention: true
+  attention_heads: 4
   dropout: 0.0
 
 phi_map:
@@ -31,10 +36,11 @@ loss:
   pred_weight: 1.0
   sem_weight: 0.5
   stab_weight: 5.0e-5
+  loss_kind: mse
 
 train:
   lr: 2.0e-4
-  weight_decay: 0.0
+  weight_decay: 1.0e-4
   max_steps: 2000
   eval_every: 100
   grad_clip: 1.0
@@ -58,7 +64,7 @@ selection:
 
 eval:
   collapse_threshold: 0.20
-  tail_percentiles: [90, 95, 99]
+  tail_percentiles: [50, 90, 95, 99]
   save_samples: true
   num_eval_batches: 16
 

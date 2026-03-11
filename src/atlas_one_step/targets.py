@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
-import itertools
 import math
 import numpy as np
 import torch
@@ -34,13 +33,10 @@ def _scheduled_coeffs(t: torch.Tensor, coeffs: list[float]) -> torch.Tensor:
 
 def construct_target(spec: TargetSpec, primitives: dict[str, torch.Tensor]) -> torch.Tensor:
     fam = spec.family
-    x0, u, r, eps, xt = primitives['x0'], primitives['u_t'], primitives['r_t'], primitives['eps'], primitives['xt']
-    t = primitives['alpha'].flatten() * 0  # dummy shape via batch only
+    x0, u, r, eps = primitives['x0'], primitives['u_t'], primitives['r_t'], primitives['eps']
     batch_size = x0.shape[0]
-    # recover original scalar t proxy through alpha if available is messy; pass explicit 't' in primitives when needed
     t = primitives.get('t_scalar', None)
     if t is None:
-        # fallback infer from alpha
         alpha = primitives['alpha'].reshape(batch_size)
         t = (2 / math.pi) * torch.arccos(alpha.clamp(-1 + 1e-6, 1 - 1e-6))
 
@@ -84,7 +80,6 @@ def construct_target(spec: TargetSpec, primitives: dict[str, torch.Tensor]) -> t
 
 
 def reconstruct_x0_from_target(spec: TargetSpec, target: torch.Tensor, primitives: dict[str, torch.Tensor]) -> torch.Tensor:
-    # Use linear algebra on primitives definitions.
     alpha = primitives['alpha']
     sigma = primitives['sigma']
     xt = primitives['xt']
@@ -98,7 +93,7 @@ def reconstruct_x0_from_target(spec: TargetSpec, target: torch.Tensor, primitive
         return c_x0, c_xt
 
     def coeffs_line_x0_r(a: float):
-        c_x0 = a + (1 - a)
+        c_x0 = 1.0
         c_xt = -(1 - a)
         return c_x0, c_xt
 
@@ -138,14 +133,21 @@ def reconstruct_x0_from_target(spec: TargetSpec, target: torch.Tensor, primitive
     else:
         raise ValueError(f'Unsupported target family: {fam}')
 
-    x0_hat = (y - c_xt * xt) / (c_x0 + 1e-6)
-    return x0_hat
+    return (y - c_xt * xt) / (c_x0 + 1e-6)
 
 
-def sample_target_specs(family: str, num_points: int, schedule_basis_order: int = 3) -> list[TargetSpec]:
+def sample_target_specs(
+    family: str,
+    num_points: int,
+    schedule_basis_order: int = 3,
+    alpha_min: float = 0.05,
+    alpha_max: float = 0.95,
+    custom_alphas: list[float] | None = None,
+) -> list[TargetSpec]:
     specs: list[TargetSpec] = []
     if family in {'line_x0_u', 'line_x0_r', 'line_x0_eps'}:
-        for alpha in np.linspace(0.05, 0.95, num_points):
+        alphas = custom_alphas if custom_alphas is not None else np.linspace(alpha_min, alpha_max, num_points)
+        for alpha in alphas:
             specs.append(TargetSpec(family=family, params={'alpha': float(alpha)}))
     elif family == 'simplex':
         vals = np.linspace(0.0, 1.0, max(3, int(math.sqrt(num_points)) + 1))
@@ -154,10 +156,7 @@ def sample_target_specs(family: str, num_points: int, schedule_basis_order: int 
                 c = 1.0 - a - b
                 if c < -1e-8:
                     continue
-                if c < 0:
-                    c = 0.0
-                specs.append(TargetSpec(family='simplex', params={'alpha': float(a), 'beta': float(b), 'gamma': float(c)}))
-        # trim to requested count but keep coverage
+                specs.append(TargetSpec(family='simplex', params={'alpha': float(a), 'beta': float(b), 'gamma': float(max(c, 0.0))}))
         specs = specs[:max(num_points, min(len(specs), num_points))]
     elif family == 'scheduled':
         rng = np.random.default_rng(0)
